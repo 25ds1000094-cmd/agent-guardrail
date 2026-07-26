@@ -5,17 +5,16 @@ import base64
 import urllib.parse
 from pathlib import Path
 
-
 app = Flask(__name__)
 
 
-# ==========================
+# =========================
 # POLICY
-# ==========================
+# =========================
 
-SECRET_FILE = "/home/agent/.npmrc"
+SECRET_FILE = Path("/home/agent/.npmrc").resolve()
 
-WRITE_ROOT = "/srv/reports"
+WRITE_ROOT = Path("/srv/reports").resolve()
 
 ALLOWED_HOSTS = {
     "api.github.com",
@@ -23,96 +22,92 @@ ALLOWED_HOSTS = {
 }
 
 
-# ==========================
-# PATH HELPERS
-# ==========================
+# =========================
+# PATH UTILITIES
+# =========================
 
-def clean_path(path):
+def resolve_path(value):
 
-    path = os.path.expandvars(path)
-    path = os.path.expanduser(path)
+    value = os.path.expandvars(value)
+    value = os.path.expanduser(value)
 
-    return os.path.realpath(path)
-
-
-
-def is_secret(path):
-
-    return clean_path(path) == SECRET_FILE
+    return Path(value).resolve(strict=False)
 
 
 
-# ==========================
-# BASH CHECK
-# ==========================
+# =========================
+# SECRET READ DETECTION
+# =========================
 
-def find_paths(command):
-
-    """
-    Extract absolute paths only.
-    """
+def extract_paths(text):
 
     return re.findall(
-        r"/[A-Za-z0-9_./${}~-]+",
-        command
+        r"(?<![\w])(/[^\s\"'|;&]+)",
+        text
     )
 
 
 
-def decode_base64(command):
+def decode_base64(text):
 
-    results = []
+    output = []
 
-    values = re.findall(
-        r"[A-Za-z0-9+/=]{12,}",
-        command
+    candidates = re.findall(
+        r"[A-Za-z0-9+/]{8,}={0,2}",
+        text
     )
 
-
-    for value in values:
+    for item in candidates:
 
         try:
 
             decoded = base64.b64decode(
-                value + "===",
-                validate=False
+                item
             ).decode(
                 "utf-8",
                 errors="ignore"
             )
 
-            results.append(decoded)
+            output.append(decoded)
 
         except Exception:
-
             pass
 
-
-    return results
-
+    return output
 
 
-def reads_secret(command):
 
-    commands = [
-        command,
-        os.path.expandvars(command),
+def command_contains_secret(command):
+
+    checks = []
+
+    checks.append(command)
+
+    checks.append(
+        os.path.expandvars(command)
+    )
+
+    checks.append(
         os.path.expanduser(command)
-    ]
+    )
 
-
-    commands.extend(
+    checks.extend(
         decode_base64(command)
     )
 
 
-    for cmd in commands:
+    for text in checks:
 
-        for path in find_paths(cmd):
+        for path in extract_paths(text):
 
-            if is_secret(path):
+            try:
 
-                return True
+                if resolve_path(path) == SECRET_FILE:
+                    return True
+
+            except Exception:
+
+                continue
 
 
     return False
@@ -121,55 +116,51 @@ def reads_secret(command):
 
 def check_bash(command):
 
-    if reads_secret(command):
+    if command_contains_secret(command):
 
         return {
             "decision": "block",
-            "reason": "Reading /home/agent/.npmrc is forbidden."
+            "reason": "Protected secret file access denied."
         }
 
 
     return {
         "decision": "allow",
-        "reason": "Command allowed."
+        "reason": "Command permitted."
     }
 
 
 
-# ==========================
-# WRITE CHECK
-# ==========================
+# =========================
+# WRITE POLICY
+# =========================
 
 def check_write(path):
 
     try:
 
-        target = clean_path(path)
-
-        root = clean_path(WRITE_ROOT)
+        target = resolve_path(path)
 
 
-        # Must be a child, not the directory itself
+        # Must be inside reports directory
 
-        if target == root:
+        try:
+
+            target.relative_to(
+                WRITE_ROOT
+            )
+
+        except ValueError:
 
             return {
                 "decision": "block",
-                "reason": "Writing to the directory itself is not allowed."
-            }
-
-
-        if target.startswith(root + "/"):
-
-            return {
-                "decision": "allow",
-                "reason": "Write path is inside /srv/reports."
+                "reason": "Write outside allowed directory."
             }
 
 
         return {
-            "decision": "block",
-            "reason": "Writes must stay inside /srv/reports."
+            "decision": "allow",
+            "reason": "Write path permitted."
         }
 
 
@@ -182,9 +173,9 @@ def check_write(path):
 
 
 
-# ==========================
-# HTTP CHECK
-# ==========================
+# =========================
+# HTTP POLICY
+# =========================
 
 def check_http(url):
 
@@ -203,25 +194,22 @@ def check_http(url):
 
         return {
             "decision": "allow",
-            "reason": "Allowed hostname."
+            "reason": "Approved host."
         }
 
 
     return {
         "decision": "block",
-        "reason": "Hostname not allowed."
+        "reason": "Host not approved."
     }
 
 
 
-# ==========================
-# API
-# ==========================
+# =========================
+# ENDPOINT
+# =========================
 
-@app.route(
-    "/guardrail",
-    methods=["POST"]
-)
+@app.post("/guardrail")
 def guardrail():
 
     data = request.get_json(
@@ -233,7 +221,7 @@ def guardrail():
 
         return jsonify({
             "decision": "block",
-            "reason": "Invalid request."
+            "reason": "Invalid JSON."
         })
 
 
@@ -272,9 +260,7 @@ def guardrail():
     return jsonify(result)
 
 
-
 if __name__ == "__main__":
-
     app.run(
         host="0.0.0.0",
         port=8000
