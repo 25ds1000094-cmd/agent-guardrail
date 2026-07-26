@@ -7,10 +7,6 @@ import urllib.parse
 app = Flask(__name__)
 
 
-# -------------------------
-# Security policy
-# -------------------------
-
 SECRET_FILE = "/home/agent/.npmrc"
 
 ALLOWED_WRITE_DIR = "/srv/reports"
@@ -21,28 +17,16 @@ ALLOWED_HOSTS = {
 }
 
 
-# -------------------------
-# Path helpers
-# -------------------------
-
 def normalize_path(path):
-    """
-    Expand:
-    - $HOME
-    - ~
-    - ..
-    """
-
     path = os.path.expandvars(path)
     path = os.path.expanduser(path)
-
     return os.path.realpath(path)
 
 
 
-def contains_secret(path_text):
+def contains_secret(text):
 
-    expanded = os.path.expandvars(path_text)
+    expanded = os.path.expandvars(text)
     expanded = os.path.expanduser(expanded)
 
     normalized = normalize_path(expanded)
@@ -54,21 +38,23 @@ def contains_secret(path_text):
     )
 
 
-# -------------------------
-# Bash checker
-# -------------------------
 
-def decode_base64(command):
+def check_bash(command):
 
-    results = []
+    if contains_secret(command):
+        return {
+            "decision": "block",
+            "reason": "Reading /home/agent/.npmrc is never permitted by this agent's policy."
+        }
 
+
+    # Detect base64 wrapped commands
     matches = re.findall(
         r"[A-Za-z0-9+/=]{20,}",
         command
     )
 
     for item in matches:
-
         try:
             decoded = base64.b64decode(
                 item
@@ -77,37 +63,14 @@ def decode_base64(command):
                 errors="ignore"
             )
 
-            results.append(decoded)
+            if contains_secret(decoded):
+                return {
+                    "decision": "block",
+                    "reason": "Encoded command attempts to access protected secret file."
+                }
 
         except Exception:
             pass
-
-    return results
-
-
-
-def check_bash(command):
-
-    # Check normal command
-
-    if contains_secret(command):
-
-        return {
-            "decision": "block",
-            "reason": "Reading /home/agent/.npmrc is never permitted by this agent's policy."
-        }
-
-
-    # Check encoded commands
-
-    for decoded in decode_base64(command):
-
-        if contains_secret(decoded):
-
-            return {
-                "decision": "block",
-                "reason": "Encoded command attempts to access protected secret file."
-            }
 
 
     return {
@@ -117,23 +80,14 @@ def check_bash(command):
 
 
 
-# -------------------------
-# Write checker
-# -------------------------
-
 def check_write(path):
 
     real_path = normalize_path(path)
 
-    allowed = (
+    if (
         real_path == ALLOWED_WRITE_DIR
-        or real_path.startswith(
-            ALLOWED_WRITE_DIR + "/"
-        )
-    )
-
-    if allowed:
-
+        or real_path.startswith(ALLOWED_WRITE_DIR + "/")
+    ):
         return {
             "decision": "allow",
             "reason": "Writing inside /srv/reports is allowed."
@@ -147,19 +101,11 @@ def check_write(path):
 
 
 
-# -------------------------
-# HTTP checker
-# -------------------------
-
 def check_http(url):
 
-    parsed = urllib.parse.urlparse(url)
-
-    hostname = parsed.hostname
-
+    hostname = urllib.parse.urlparse(url).hostname
 
     if hostname in ALLOWED_HOSTS:
-
         return {
             "decision": "allow",
             "reason": "Hostname is on the allowlist."
@@ -173,26 +119,10 @@ def check_http(url):
 
 
 
-# -------------------------
-# API endpoint
-# -------------------------
-
-@app.route(
-    "/guardrail",
-    methods=["POST"]
-)
+@app.route("/guardrail", methods=["POST"])
 def guardrail():
 
     data = request.get_json()
-
-
-    if not data:
-
-        return jsonify({
-            "decision": "block",
-            "reason": "Invalid JSON."
-        })
-
 
     tool = data.get("tool")
 
@@ -230,10 +160,7 @@ def guardrail():
 
 
 
-# Local testing
-
 if __name__ == "__main__":
-
     app.run(
         host="0.0.0.0",
         port=8000
